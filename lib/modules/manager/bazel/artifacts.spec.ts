@@ -3,7 +3,9 @@ import { codeBlock } from 'common-tags';
 import type { UpdateArtifact } from '../types';
 import { updateArtifacts } from '.';
 import * as httpMock from '~test/http-mock';
-import { partial } from '~test/util';
+import { fs, partial } from '~test/util';
+
+vi.mock('../../../util/fs');
 
 describe('modules/manager/bazel/artifacts', () => {
   it('updates commit-based http archive', async () => {
@@ -801,5 +803,242 @@ describe('modules/manager/bazel/artifacts', () => {
         },
       },
     ]);
+  });
+
+  it('handles http_archive with valid patches', async () => {
+    const inputHash =
+      'b5f6abe419da897b7901f90cbab08af958b97a8f3575b0d3dd062ac7ce78541f';
+    const input = codeBlock`
+      http_archive(
+        name = "bazel_skylib",
+        sha256 = "${inputHash}",
+        strip_prefix = "bazel-skylib-0.5.0",
+        urls = ["https://github.com/bazelbuild/bazel-skylib/archive/0.5.0.tar.gz"],
+        patches = ["//:skylib.patch"],
+        patch_strip = 1,
+      )
+    `;
+
+    const currentValue = '0.5.0';
+    const newValue = '0.6.2';
+    const upgrade = {
+      depName: 'bazel_skylib',
+      depType: 'http_archive',
+      repo: 'bazelbuild/bazel-skylib',
+      managerData: { idx: 0 },
+      currentValue,
+      newValue,
+    };
+
+    const tarContent = Buffer.from('foo');
+    const outputHash = crypto
+      .createHash('sha256')
+      .update(tarContent)
+      .digest('hex');
+
+    const patchContent = codeBlock`
+      --- a/old_file.txt
+      +++ b/new_file.txt
+      @@ -1,3 +1,3 @@
+       line1
+      -old_line
+      +new_line
+       line3
+    `;
+
+    const output = input
+      .replace(currentValue, newValue)
+      .replace(currentValue, newValue)
+      .replace(inputHash, outputHash);
+
+    fs.readLocalFile.mockResolvedValueOnce(patchContent);
+
+    httpMock
+      .scope('https://github.com')
+      .get('/bazelbuild/bazel-skylib/archive/0.6.2.tar.gz')
+      .reply(200, tarContent);
+
+    const res = await updateArtifacts(
+      partial<UpdateArtifact>({
+        packageFileName: 'WORKSPACE',
+        updatedDeps: [upgrade],
+        newPackageFileContent: input,
+      }),
+    );
+
+    expect(res).toEqual([
+      {
+        file: {
+          contents: output,
+          path: 'WORKSPACE',
+          type: 'addition',
+        },
+      },
+    ]);
+
+    expect(fs.readLocalFile).toHaveBeenCalledWith('.///:skylib.patch');
+  });
+
+  it('skips update for http_archive with invalid patches', async () => {
+    const inputHash =
+      'b5f6abe419da897b7901f90cbab08af958b97a8f3575b0d3dd062ac7ce78541f';
+    const input = codeBlock`
+      http_archive(
+        name = "bazel_skylib",
+        sha256 = "${inputHash}",
+        strip_prefix = "bazel-skylib-0.5.0",
+        urls = ["https://github.com/bazelbuild/bazel-skylib/archive/0.5.0.tar.gz"],
+        patches = ["//:invalid.patch"],
+        patch_strip = 1,
+      )
+    `;
+
+    const currentValue = '0.5.0';
+    const newValue = '0.6.2';
+    const upgrade = {
+      depName: 'bazel_skylib',
+      depType: 'http_archive',
+      repo: 'bazelbuild/bazel-skylib',
+      managerData: { idx: 0 },
+      currentValue,
+      newValue,
+    };
+
+    const invalidPatchContent = 'This is not a valid patch file';
+
+    fs.readLocalFile.mockResolvedValueOnce(invalidPatchContent);
+
+    const res = await updateArtifacts(
+      partial<UpdateArtifact>({
+        packageFileName: 'WORKSPACE',
+        updatedDeps: [upgrade],
+        newPackageFileContent: input,
+      }),
+    );
+
+    expect(res).toBeNull();
+    expect(fs.readLocalFile).toHaveBeenCalledWith('.///:invalid.patch');
+  });
+
+  it('skips update for http_archive with missing patch files', async () => {
+    const inputHash =
+      'b5f6abe419da897b7901f90cbab08af958b97a8f3575b0d3dd062ac7ce78541f';
+    const input = codeBlock`
+      http_archive(
+        name = "bazel_skylib",
+        sha256 = "${inputHash}",
+        strip_prefix = "bazel-skylib-0.5.0",
+        urls = ["https://github.com/bazelbuild/bazel-skylib/archive/0.5.0.tar.gz"],
+        patches = ["//:missing.patch"],
+        patch_strip = 1,
+      )
+    `;
+
+    const currentValue = '0.5.0';
+    const newValue = '0.6.2';
+    const upgrade = {
+      depName: 'bazel_skylib',
+      depType: 'http_archive',
+      repo: 'bazelbuild/bazel-skylib',
+      managerData: { idx: 0 },
+      currentValue,
+      newValue,
+    };
+
+    fs.readLocalFile.mockResolvedValueOnce(null);
+
+    const res = await updateArtifacts(
+      partial<UpdateArtifact>({
+        packageFileName: 'WORKSPACE',
+        updatedDeps: [upgrade],
+        newPackageFileContent: input,
+      }),
+    );
+
+    expect(res).toBeNull();
+    expect(fs.readLocalFile).toHaveBeenCalledWith('.///:missing.patch');
+  });
+
+  it('handles http_archive with multiple patches', async () => {
+    const inputHash =
+      'b5f6abe419da897b7901f90cbab08af958b97a8f3575b0d3dd062ac7ce78541f';
+    const input = codeBlock`
+      http_archive(
+        name = "bazel_skylib",
+        sha256 = "${inputHash}",
+        strip_prefix = "bazel-skylib-0.5.0",
+        urls = ["https://github.com/bazelbuild/bazel-skylib/archive/0.5.0.tar.gz"],
+        patches = ["//:patch1.patch", "//:patch2.patch"],
+        patch_strip = 1,
+      )
+    `;
+
+    const currentValue = '0.5.0';
+    const newValue = '0.6.2';
+    const upgrade = {
+      depName: 'bazel_skylib',
+      depType: 'http_archive',
+      repo: 'bazelbuild/bazel-skylib',
+      managerData: { idx: 0 },
+      currentValue,
+      newValue,
+    };
+
+    const tarContent = Buffer.from('foo');
+    const outputHash = crypto
+      .createHash('sha256')
+      .update(tarContent)
+      .digest('hex');
+
+    const patchContent1 = codeBlock`
+      --- a/file1.txt
+      +++ b/file1.txt
+      @@ -1,2 +1,2 @@
+      -old content 1
+      +new content 1
+    `;
+
+    const patchContent2 = codeBlock`
+      --- a/file2.txt
+      +++ b/file2.txt
+      @@ -1,2 +1,2 @@
+      -old content 2
+      +new content 2
+    `;
+
+    const output = input
+      .replace(currentValue, newValue)
+      .replace(currentValue, newValue)
+      .replace(inputHash, outputHash);
+
+    fs.readLocalFile
+      .mockResolvedValueOnce(patchContent1)
+      .mockResolvedValueOnce(patchContent2);
+
+    httpMock
+      .scope('https://github.com')
+      .get('/bazelbuild/bazel-skylib/archive/0.6.2.tar.gz')
+      .reply(200, tarContent);
+
+    const res = await updateArtifacts(
+      partial<UpdateArtifact>({
+        packageFileName: 'WORKSPACE',
+        updatedDeps: [upgrade],
+        newPackageFileContent: input,
+      }),
+    );
+
+    expect(res).toEqual([
+      {
+        file: {
+          contents: output,
+          path: 'WORKSPACE',
+          type: 'addition',
+        },
+      },
+    ]);
+
+    expect(fs.readLocalFile).toHaveBeenCalledWith('.///:patch1.patch');
+    expect(fs.readLocalFile).toHaveBeenCalledWith('.///:patch2.patch');
   });
 });

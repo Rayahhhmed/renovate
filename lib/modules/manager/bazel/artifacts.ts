@@ -1,6 +1,7 @@
 import is from '@sindresorhus/is';
 import { logger } from '../../../logger';
 import * as packageCache from '../../../util/cache/package';
+import { readLocalFile } from '../../../util/fs';
 import { hashStream } from '../../../util/hash';
 import { Http } from '../../../util/http';
 import { map as pMap } from '../../../util/promises';
@@ -29,6 +30,92 @@ function getUrlFragments(rule: RecordFragment): StringFragment[] {
   }
 
   return urls;
+}
+
+function getPatchFragments(rule: RecordFragment): StringFragment[] {
+  const patches: StringFragment[] = [];
+
+  const patchesRecord = rule.children.patches;
+  if (patchesRecord?.type === 'array') {
+    for (const patchRecord of patchesRecord.children) {
+      if (patchRecord.type === 'string') {
+        patches.push(patchRecord);
+      }
+    }
+  }
+
+  return patches;
+}
+
+async function validatePatchFile(
+  patchPath: string,
+  basePath: string,
+): Promise<boolean> {
+  try {
+    // Convert Bazel label to file path if needed
+    let filePath = patchPath;
+    if (patchPath.startsWith('//:')) {
+      filePath = patchPath.replace('//:/', '');
+    } else if (patchPath.startsWith('//')) {
+      filePath = patchPath.replace('//', '');
+    }
+
+    // Resolve relative to base path
+    const fullPath = basePath ? `${basePath}/${filePath}` : filePath;
+
+    const patchBuffer = await readLocalFile(fullPath);
+    if (!patchBuffer) {
+      logger.debug(`Patch file not found: ${fullPath}`);
+      return false;
+    }
+
+    const patchContent = patchBuffer.toString('utf8');
+
+    // Basic patch file validation - check if it looks like a patch
+    const hasMinusLines = patchContent.includes('\n-');
+    const hasPlusLines = patchContent.includes('\n+');
+    const hasAtAtLines = /^@@.+@@/m.test(patchContent);
+
+    if (!hasAtAtLines || (!hasMinusLines && !hasPlusLines)) {
+      logger.debug(`File does not appear to be a valid patch: ${fullPath}`);
+      return false;
+    }
+
+    logger.debug(`Validated patch file: ${fullPath}`);
+    return true;
+  } catch (error) {
+    logger.debug({ error, patchPath }, 'Error validating patch file');
+    return false;
+  }
+}
+
+async function validatePatches(
+  patchFragments: StringFragment[],
+  basePath: string,
+): Promise<boolean> {
+  if (!patchFragments.length) {
+    return true; // No patches to validate
+  }
+
+  const validationResults = await pMap(patchFragments, (patch) =>
+    validatePatchFile(patch.value, basePath),
+  );
+
+  const validPatches = validationResults.filter(Boolean).length;
+  const totalPatches = patchFragments.length;
+
+  if (validPatches === 0) {
+    logger.warn(`No valid patch files found out of ${totalPatches} patches`);
+    return false;
+  }
+
+  if (validPatches < totalPatches) {
+    logger.warn(
+      `Only ${validPatches} out of ${totalPatches} patch files are valid`,
+    );
+  }
+
+  return true;
 }
 
 const urlMassages = {
@@ -141,6 +228,22 @@ export async function updateArtifacts(
         continue;
       }
 
+      // Check and validate patches if they exist
+      const patchFragments = getPatchFragments(rule);
+      if (patchFragments.length > 0) {
+        const basePath = path.substring(0, path.lastIndexOf('/')) || '.';
+        const patchesValid = await validatePatches(patchFragments, basePath);
+        if (!patchesValid) {
+          logger.warn(
+            `Skipping update for ${rule.value} due to invalid patches`,
+          );
+          continue;
+        }
+        logger.debug(
+          `Found and validated ${patchFragments.length} patch files for ${rule.value}`,
+        );
+      }
+
       const updateValues = (oldUrl: string): string => {
         let url = oldUrl;
         url = replaceValues(url, upgrade.currentValue, upgrade.newValue);
@@ -166,6 +269,17 @@ export async function updateArtifacts(
         updateValues,
       );
       newContents = updateCode(newContents, [idx, 'sha256'], hash);
+
+      // Update patch_strip if it exists and patches are present
+      if (patchFragments.length > 0) {
+        const patchStripFragment = rule.children.patch_strip;
+        if (patchStripFragment?.type === 'string') {
+          logger.debug(
+            `Found patch_strip value: ${patchStripFragment.value} for ${rule.value}`,
+          );
+          // Keep existing patch_strip value - no need to update unless specifically requested
+        }
+      }
     }
   }
 
