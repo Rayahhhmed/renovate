@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { codeBlock } from 'common-tags';
 import type { UpdateArtifact } from '../types';
+import { convertBazelPatchPathToFilePath } from './artifacts';
 import { updateArtifacts } from '.';
 import * as httpMock from '~test/http-mock';
 import { fs, partial } from '~test/util';
@@ -1040,5 +1041,14 @@ describe('modules/manager/bazel/artifacts', () => {
 
     expect(fs.readLocalFile).toHaveBeenCalledWith('.///:patch1.patch');
     expect(fs.readLocalFile).toHaveBeenCalledWith('.///:patch2.patch');
+  });
+
+  it.only('converts bazel path to file path', () => {
+    expect(
+      convertBazelPatchPathToFilePath('//:third_party/libheif/libheif.patch'),
+    ).toBe('third_party/libheif/libheif.patch');
+    expect(
+      convertBazelPatchPathToFilePath('//third_party/libheif/libheif.patch'),
+    ).toBe('third_party/libheif/libheif.patch');
   });
 });

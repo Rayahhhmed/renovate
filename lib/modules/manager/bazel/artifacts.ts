@@ -47,25 +47,14 @@ function getPatchFragments(rule: RecordFragment): StringFragment[] {
   return patches;
 }
 
-async function validatePatchFile(
-  patchPath: string,
-  basePath: string,
-): Promise<boolean> {
+async function validatePatchFile(patchPath: string): Promise<boolean> {
   try {
     // Convert Bazel label to file path if needed
-    let filePath = patchPath;
-    if (patchPath.startsWith('//:')) {
-      filePath = patchPath.replace('//:/', '');
-    } else if (patchPath.startsWith('//')) {
-      filePath = patchPath.replace('//', '');
-    }
+    const filePath = convertBazelPatchPathToFilePath(patchPath);
 
-    // Resolve relative to base path
-    const fullPath = basePath ? `${basePath}/${filePath}` : filePath;
-
-    const patchBuffer = await readLocalFile(fullPath);
+    const patchBuffer = await readLocalFile(filePath);
     if (!patchBuffer) {
-      logger.debug(`Patch file not found: ${fullPath}`);
+      logger.debug(`Patch file not found: ${filePath}`);
       return false;
     }
 
@@ -77,11 +66,11 @@ async function validatePatchFile(
     const hasAtAtLines = /^@@.+@@/m.test(patchContent);
 
     if (!hasAtAtLines || (!hasMinusLines && !hasPlusLines)) {
-      logger.debug(`File does not appear to be a valid patch: ${fullPath}`);
+      logger.debug(`File does not appear to be a valid patch: ${filePath}`);
       return false;
     }
 
-    logger.debug(`Validated patch file: ${fullPath}`);
+    logger.debug(`Validated patch file: ${filePath}`);
     return true;
   } catch (error) {
     logger.debug({ error, patchPath }, 'Error validating patch file');
@@ -91,14 +80,13 @@ async function validatePatchFile(
 
 async function validatePatches(
   patchFragments: StringFragment[],
-  basePath: string,
 ): Promise<boolean> {
   if (!patchFragments.length) {
     return true; // No patches to validate
   }
 
   const validationResults = await pMap(patchFragments, (patch) =>
-    validatePatchFile(patch.value, basePath),
+    validatePatchFile(patch.value),
   );
 
   const validPatches = validationResults.filter(Boolean).length;
@@ -205,6 +193,13 @@ async function getHashFromUrls(urls: string[]): Promise<string | null> {
   return hashes[0];
 }
 
+export function convertBazelPatchPathToFilePath(path: string): string {
+  if (path.startsWith('//:') || path.startsWith('//')) {
+    return path.replace('//:', '').replace('//', '');
+  }
+  return path;
+}
+
 export async function updateArtifacts(
   updateArtifact: UpdateArtifact,
 ): Promise<UpdateArtifactsResult[] | null> {
@@ -227,12 +222,14 @@ export async function updateArtifacts(
         logger.debug(`def: ${rule.value}, urls is empty`);
         continue;
       }
+      console.log('urlFragments', urlFragments);
+      console.log('rule', rule);
 
       // Check and validate patches if they exist
       const patchFragments = getPatchFragments(rule);
+      console.log('patchFragments', patchFragments);
       if (patchFragments.length > 0) {
-        const basePath = path.substring(0, path.lastIndexOf('/')) || '.';
-        const patchesValid = await validatePatches(patchFragments, basePath);
+        const patchesValid = await validatePatches(patchFragments);
         if (!patchesValid) {
           logger.warn(
             `Skipping update for ${rule.value} due to invalid patches`,
@@ -268,6 +265,7 @@ export async function updateArtifacts(
         [idx, 'strip_prefix'],
         updateValues,
       );
+
       newContents = updateCode(newContents, [idx, 'sha256'], hash);
 
       // Update patch_strip if it exists and patches are present
