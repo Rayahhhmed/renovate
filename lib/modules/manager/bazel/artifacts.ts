@@ -49,12 +49,15 @@ function getPatchFragments(rule: RecordFragment): StringFragment[] {
 
 async function validatePatchFile(patchPath: string): Promise<boolean> {
   try {
-    // Convert Bazel label to file path if needed
-    const filePath = convertBazelPatchPathToFilePath(patchPath);
-
+    // Add ./ prefix for relative Bazel paths if needed
+    const filePath = patchPath.startsWith('//:')
+      ? `./${patchPath}`
+      : patchPath.startsWith('//')
+        ? `.${patchPath}`
+        : patchPath;
     const patchBuffer = await readLocalFile(filePath);
     if (!patchBuffer) {
-      logger.debug(`Patch file not found: ${filePath}`);
+      logger.debug(`Patch file not found: ${patchPath}`);
       return false;
     }
 
@@ -66,11 +69,11 @@ async function validatePatchFile(patchPath: string): Promise<boolean> {
     const hasAtAtLines = /^@@.+@@/m.test(patchContent);
 
     if (!hasAtAtLines || (!hasMinusLines && !hasPlusLines)) {
-      logger.debug(`File does not appear to be a valid patch: ${filePath}`);
+      logger.debug(`File does not appear to be a valid patch: ${patchPath}`);
       return false;
     }
 
-    logger.debug(`Validated patch file: ${filePath}`);
+    logger.debug(`Validated patch file: ${patchPath}`);
     return true;
   } catch (error) {
     logger.debug({ error, patchPath }, 'Error validating patch file');
@@ -98,7 +101,7 @@ async function validatePatches(
   }
 
   if (validPatches < totalPatches) {
-    logger.warn(
+    logger.debug(
       `Only ${validPatches} out of ${totalPatches} patch files are valid`,
     );
   }
@@ -200,12 +203,66 @@ export function convertBazelPatchPathToFilePath(path: string): string {
   return path;
 }
 
+async function getPatchContent(path: string): Promise<string | undefined> {
+  // Add ./ prefix for relative Bazel paths if needed
+  const filePath = path.startsWith('//:')
+    ? `./${path}`
+    : path.startsWith('//')
+      ? `.${path}`
+      : path;
+  const localPathContent = await readLocalFile(filePath);
+  return localPathContent?.toString('utf8');
+}
+
+async function updatePatchPackageVersion(
+  patch: string,
+  upgrade: Upgrade,
+): Promise<string | null> {
+  const patchContent = await getPatchContent(patch);
+  if (!patchContent) {
+    return null;
+  }
+
+  // Look for package_version lines in patch content that need updating
+  const packageVersionRegex = /^(\+.*package_version\s*=\s*")([^"]+)(".*)/gm;
+  let updatedContent = patchContent;
+  let hasChanges = false;
+
+  if (upgrade.currentValue && upgrade.newValue) {
+    updatedContent = updatedContent.replace(
+      packageVersionRegex,
+      (match, prefix, version, suffix) => {
+        if (version === upgrade.currentValue) {
+          hasChanges = true;
+          return prefix + upgrade.newValue + suffix;
+        }
+        return match;
+      },
+    );
+  } else if (upgrade.currentVersion && upgrade.newVersion) {
+    updatedContent = updatedContent.replace(
+      packageVersionRegex,
+      (match, prefix, version, suffix) => {
+        if (version === upgrade.currentVersion) {
+          hasChanges = true;
+          return prefix + upgrade.newVersion + suffix;
+        }
+        return match;
+      },
+    );
+  }
+
+  return hasChanges ? updatedContent : null;
+}
+
 export async function updateArtifacts(
   updateArtifact: UpdateArtifact,
 ): Promise<UpdateArtifactsResult[] | null> {
   const { packageFileName: path, updatedDeps: upgrades } = updateArtifact;
   const oldContents = updateArtifact.newPackageFileContent;
   let newContents = oldContents;
+  const artifactFiles: UpdateArtifactsResult[] = [];
+
   for (const upgrade of upgrades) {
     const { managerData } = upgrade;
     const idx = managerData?.idx as number;
@@ -222,23 +279,43 @@ export async function updateArtifacts(
         logger.debug(`def: ${rule.value}, urls is empty`);
         continue;
       }
-      console.log('urlFragments', urlFragments);
-      console.log('rule', rule);
 
       // Check and validate patches if they exist
       const patchFragments = getPatchFragments(rule);
-      console.log('patchFragments', patchFragments);
       if (patchFragments.length > 0) {
         const patchesValid = await validatePatches(patchFragments);
         if (!patchesValid) {
-          logger.warn(
-            `Skipping update for ${rule.value} due to invalid patches`,
-          );
+          logger.debug(`Skipping update due to invalid patches`);
           continue;
         }
         logger.debug(
-          `Found and validated ${patchFragments.length} patch files for ${rule.value}`,
+          `Found and validated ${patchFragments.length} patch files`,
         );
+
+        // Update patch files with new package versions
+        const patchesFragment = rule.children.patches;
+        if (patchesFragment?.type === 'array') {
+          for (const patch of patchesFragment.children) {
+            if (patch.type === 'string') {
+              const updatedPatchContent = await updatePatchPackageVersion(
+                patch.value,
+                upgrade,
+              );
+              if (updatedPatchContent) {
+                const patchPath = convertBazelPatchPathToFilePath(patch.value);
+                logger.debug(`Updating patch file: ${patchPath}`);
+
+                artifactFiles.push({
+                  file: {
+                    type: 'addition',
+                    path: patchPath,
+                    contents: updatedPatchContent,
+                  },
+                });
+              }
+            }
+          }
+        }
       }
 
       const updateValues = (oldUrl: string): string => {
@@ -281,17 +358,21 @@ export async function updateArtifacts(
     }
   }
 
-  if (oldContents === newContents) {
-    return null;
-  }
+  const results: UpdateArtifactsResult[] = [];
 
-  return [
-    {
+  // Add main package file if it changed
+  if (oldContents !== newContents) {
+    results.push({
       file: {
         type: 'addition',
         path,
         contents: newContents,
       },
-    },
-  ];
+    });
+  }
+
+  // Add any updated patch files
+  results.push(...artifactFiles);
+
+  return results.length > 0 ? results : null;
 }

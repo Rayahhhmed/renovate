@@ -1043,7 +1043,134 @@ describe('modules/manager/bazel/artifacts', () => {
     expect(fs.readLocalFile).toHaveBeenCalledWith('.///:patch2.patch');
   });
 
-  it.only('converts bazel path to file path', () => {
+  it('updates package_version in patch files', async () => {
+    const inputHash =
+      'b5f6abe419da897b7901f90cbab08af958b97a8f3575b0d3dd062ac7ce78541f';
+    const input = codeBlock`
+      http_archive(
+        name = "libheif",
+        sha256 = "${inputHash}",
+        strip_prefix = "libheif-1.18.2",
+        urls = ["https://github.com/strukturag/libheif/archive/v1.18.2.tar.gz"],
+        patches = ["//:libheif.patch"],
+        patch_strip = 1,
+      )
+    `;
+
+    const currentValue = '1.18.2';
+    const newValue = '1.19.0';
+    const upgrade = {
+      depName: 'libheif',
+      depType: 'http_archive',
+      repo: 'strukturag/libheif',
+      managerData: { idx: 0 },
+      currentValue,
+      newValue,
+    };
+
+    const tarContent = Buffer.from('foo');
+    const outputHash = crypto
+      .createHash('sha256')
+      .update(tarContent)
+      .digest('hex');
+
+    const patchContent = codeBlock`
+      From: Author <author@example.com>
+      Date: Thu, 1 Jan 1970 00:00:00 +0000
+      Subject: [PATCH] add build file
+
+      ---
+       BUILD.bazel | 63 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+       1 file changed, 63 insertions(+)
+       create mode 100644 BUILD.bazel
+
+      diff --git a/BUILD.bazel b/BUILD.bazel
+      new file mode 100644
+      index 0000000..f8f2d8e
+      --- /dev/null
+      +++ b/BUILD.bazel
+      @@ -0,0 +1,25 @@
+      +load("@rules_license//rules:package_info.bzl", "package_info")
+      +
+      +package_info(
+      +    name = "package_info",
+      +    package_name = "libheif",
+      +    cpe = "cpe:2.3:a:struktur:libheif",
+      +    package_version = "1.18.2",
+      +)
+      --
+      2.49.0
+    `;
+
+    const expectedPatchContent = codeBlock`
+      From: Author <author@example.com>
+      Date: Thu, 1 Jan 1970 00:00:00 +0000
+      Subject: [PATCH] add build file
+
+      ---
+       BUILD.bazel | 63 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+       1 file changed, 63 insertions(+)
+       create mode 100644 BUILD.bazel
+
+      diff --git a/BUILD.bazel b/BUILD.bazel
+      new file mode 100644
+      index 0000000..f8f2d8e
+      --- /dev/null
+      +++ b/BUILD.bazel
+      @@ -0,0 +1,25 @@
+      +load("@rules_license//rules:package_info.bzl", "package_info")
+      +
+      +package_info(
+      +    name = "package_info",
+      +    package_name = "libheif",
+      +    cpe = "cpe:2.3:a:struktur:libheif",
+      +    package_version = "1.19.0",
+      +)
+      --
+      2.49.0
+    `;
+
+    const expectedOutput = input
+      .replace(currentValue, newValue)
+      .replace(currentValue, newValue)
+      .replace(inputHash, outputHash);
+
+    fs.readLocalFile.mockResolvedValueOnce(patchContent);
+
+    httpMock
+      .scope('https://github.com')
+      .get('/strukturag/libheif/archive/v1.19.0.tar.gz')
+      .reply(200, tarContent);
+
+    const res = await updateArtifacts(
+      partial<UpdateArtifact>({
+        packageFileName: 'WORKSPACE',
+        updatedDeps: [upgrade],
+        newPackageFileContent: input,
+      }),
+    );
+
+    expect(res).toEqual([
+      {
+        file: {
+          contents: expectedOutput,
+          path: 'WORKSPACE',
+          type: 'addition',
+        },
+      },
+      {
+        file: {
+          contents: expectedPatchContent,
+          path: 'libheif.patch',
+          type: 'addition',
+        },
+      },
+    ]);
+
+    expect(fs.readLocalFile).toHaveBeenCalledWith('.///:libheif.patch');
+  });
+
+  it('converts bazel path to file path', () => {
     expect(
       convertBazelPatchPathToFilePath('//:third_party/libheif/libheif.patch'),
     ).toBe('third_party/libheif/libheif.patch');
