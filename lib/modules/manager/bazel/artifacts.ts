@@ -224,7 +224,8 @@ async function updatePatchPackageVersion(
   }
 
   // Look for package_version lines in patch content that need updating
-  const packageVersionRegex = /^(\+.*package_version\s*=\s*")([^"]+)(".*)/gm;
+  // Match lines that contain + followed by package_version = "version"
+  const packageVersionRegex = /^(\s*\+.*package_version\s*=\s*")([^"]+)(".*)/gm;
   let updatedContent = patchContent;
   let hasChanges = false;
 

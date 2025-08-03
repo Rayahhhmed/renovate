@@ -1135,7 +1135,9 @@ describe('modules/manager/bazel/artifacts', () => {
       .replace(currentValue, newValue)
       .replace(inputHash, outputHash);
 
-    fs.readLocalFile.mockResolvedValueOnce(patchContent);
+    fs.readLocalFile
+      .mockResolvedValueOnce(patchContent) // For validation
+      .mockResolvedValueOnce(patchContent); // For content reading
 
     httpMock
       .scope('https://github.com')
@@ -1149,8 +1151,7 @@ describe('modules/manager/bazel/artifacts', () => {
         newPackageFileContent: input,
       }),
     );
-
-    expect(res).toEqual([
+    const expectedTotalOutput = [
       {
         file: {
           contents: expectedOutput,
@@ -1165,7 +1166,12 @@ describe('modules/manager/bazel/artifacts', () => {
           type: 'addition',
         },
       },
-    ]);
+    ];
+
+    console.log('res', res);
+    console.log('expectedTotalOutput', expectedTotalOutput);
+
+    expect(res).toEqual(expectedTotalOutput);
 
     expect(fs.readLocalFile).toHaveBeenCalledWith('.///:libheif.patch');
   });
